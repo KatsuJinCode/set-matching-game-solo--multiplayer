@@ -17,7 +17,22 @@ export interface Player {
     unsuccessfulSets: number;
 }
 
-export type GamePhase = 'idle' | 'live' | 'buzzed' | 'selecting' | 'validating' | 'cooldown';
+export type GamePhase =
+    | 'setup'            // Waiting for all 12 instances
+    | 'playerSelection'  // Selecting player positions
+    | 'countdown'        // Pre-game countdown with rules
+    | 'live'             // Active game, can buzz in
+    | 'buzzHeld'         // Buzzer pressed, waiting for release
+    | 'buzzed'           // Buzzer released, showing winner
+    | 'selecting'        // Player selecting their set
+    | 'validating'       // Validating the selected set
+    | 'cooldown';        // Post-validation cooldown
+
+export interface TimerSettings {
+    buzzHoldTimeout: number;      // Seconds to release buzzer (default 3)
+    selectionTimeout: number;     // Seconds to select set (default 4)
+    countdownDuration: number;    // Seconds for pre-game countdown (default 5)
+}
 
 export interface GameState {
     themeId: string;
@@ -25,12 +40,27 @@ export interface GameState {
     players: Player[];
     deck: Card[];
     activeCards: Card[]; // 12 cards currently displayed
+
+    // Instance management
+    registeredInstances: string[]; // Context IDs of all instances
+    instanceCardMap: { [contextId: string]: number }; // Maps context to card index (0-11)
+
+    // Player position selection
+    playerPositions: { [playerId: number]: number }; // Maps player ID to card index
+    selectedPlayerForSwap: number | null; // Player ID selected for position swap
+
+    // Legacy compatibility
     cardContextMap: { [cardId: number]: string }; // Maps card ID to context ID
+
+    // Game state
     selectedCards: number[]; // Card IDs of selected cards (max 3)
     gamePhase: GamePhase;
     buzzedInPlayer: number | null; // Player ID who buzzed in
+    buzzPressTime: number | null; // Timestamp when buzzer was pressed
     selectionTimer: number | null; // Timestamp when selection timer started
-    selectionTimeoutSeconds: number; // How long player has to select (default 4)
+
+    // Timer settings
+    timerSettings: TimerSettings;
 }
 
 export class GameStateManager {
@@ -110,12 +140,31 @@ export class GameStateManager {
             ],
             deck: deck,
             activeCards: deck.slice(0, 12),
+
+            // Instance management
+            registeredInstances: [],
+            instanceCardMap: {},
+
+            // Player positions (default corners for 4 players: 0, 3, 8, 11)
+            playerPositions: { 1: 0, 2: 3, 3: 8, 4: 11 },
+            selectedPlayerForSwap: null,
+
+            // Legacy
             cardContextMap: {},
+
+            // Game state
             selectedCards: [],
-            gamePhase: 'live',
+            gamePhase: 'setup',
             buzzedInPlayer: null,
+            buzzPressTime: null,
             selectionTimer: null,
-            selectionTimeoutSeconds: 4
+
+            // Timer settings
+            timerSettings: {
+                buzzHoldTimeout: 3,
+                selectionTimeout: 4,
+                countdownDuration: 5
+            }
         };
     }
 
@@ -168,12 +217,31 @@ export class GameStateManager {
             players,
             deck,
             activeCards: deck.slice(0, 12),
+
+            // Instance management
+            registeredInstances: [],
+            instanceCardMap: {},
+
+            // Player positions (default corners for 4 players: 0, 3, 8, 11)
+            playerPositions: { 1: 0, 2: 3, 3: 8, 4: 11 },
+            selectedPlayerForSwap: null,
+
+            // Legacy
             cardContextMap: {},
+
+            // Game state
             selectedCards: [],
-            gamePhase: 'live',
+            gamePhase: 'setup',
             buzzedInPlayer: null,
+            buzzPressTime: null,
             selectionTimer: null,
-            selectionTimeoutSeconds: 4
+
+            // Timer settings
+            timerSettings: {
+                buzzHoldTimeout: 3,
+                selectionTimeout: 4,
+                countdownDuration: 5
+            }
         };
 
         this.saveState();
@@ -181,14 +249,71 @@ export class GameStateManager {
     }
 
     /**
-     * Register a card context with a card ID
+     * Register a plugin instance
      */
-    registerCard(context: string, cardIndex: number): void {
-        if (cardIndex >= 0 && cardIndex < this.state.activeCards.length) {
-            const cardId = this.state.activeCards[cardIndex].id;
-            this.state.cardContextMap[cardId] = context;
-            streamDeck.logger.trace(`Registered card ${cardId} to context ${context}`);
+    registerInstance(context: string): void {
+        if (!this.state.registeredInstances.includes(context)) {
+            this.state.registeredInstances.push(context);
+
+            // Auto-assign card index (next available)
+            let assignedIndex = -1;
+            for (let i = 0; i < 12; i++) {
+                const existingContext = Object.entries(this.state.instanceCardMap)
+                    .find(([, idx]) => idx === i);
+                if (!existingContext) {
+                    assignedIndex = i;
+                    break;
+                }
+            }
+
+            if (assignedIndex >= 0) {
+                this.state.instanceCardMap[context] = assignedIndex;
+                streamDeck.logger.info(`Registered instance ${context} as card ${assignedIndex + 1}/12`);
+            }
+
+            // Check if we have all 12 instances
+            if (this.state.registeredInstances.length === 12 && this.state.gamePhase === 'setup') {
+                streamDeck.logger.info('All 12 instances registered, entering player selection');
+                this.state.gamePhase = 'playerSelection';
+            }
+
+            this.saveState();
+            this.notifyWatchers();
         }
+    }
+
+    /**
+     * Unregister a plugin instance
+     */
+    unregisterInstance(context: string): void {
+        const index = this.state.registeredInstances.indexOf(context);
+        if (index >= 0) {
+            this.state.registeredInstances.splice(index, 1);
+            delete this.state.instanceCardMap[context];
+
+            // If we drop below 12, go back to setup
+            if (this.state.registeredInstances.length < 12) {
+                this.state.gamePhase = 'setup';
+            }
+
+            streamDeck.logger.info(`Unregistered instance ${context}, now ${this.state.registeredInstances.length}/12`);
+            this.saveState();
+            this.notifyWatchers();
+        }
+    }
+
+    /**
+     * Get card index for a context
+     */
+    getCardIndexForContext(context: string): number {
+        return this.state.instanceCardMap[context] ?? 0;
+    }
+
+    /**
+     * Get registered instance count
+     */
+    getInstanceCount(): number {
+        return this.state.registeredInstances.length;
     }
 
     /**
@@ -205,7 +330,104 @@ export class GameStateManager {
     }
 
     /**
-     * Handle buzz-in attempt
+     * Handle player selection for position swapping
+     */
+    selectPlayerForSwap(playerId: number): void {
+        if (this.state.gamePhase !== 'playerSelection') return;
+
+        if (this.state.selectedPlayerForSwap === null) {
+            // First selection - mark this player
+            this.state.selectedPlayerForSwap = playerId;
+            streamDeck.logger.info(`Player ${playerId} selected for swap`);
+        } else if (this.state.selectedPlayerForSwap === playerId) {
+            // Clicked same player - deselect
+            this.state.selectedPlayerForSwap = null;
+            streamDeck.logger.info(`Player ${playerId} deselected`);
+        } else {
+            // Second selection - swap positions
+            const pos1 = this.state.playerPositions[this.state.selectedPlayerForSwap];
+            const pos2 = this.state.playerPositions[playerId];
+
+            this.state.playerPositions[this.state.selectedPlayerForSwap] = pos2;
+            this.state.playerPositions[playerId] = pos1;
+
+            streamDeck.logger.info(`Swapped player ${this.state.selectedPlayerForSwap} and player ${playerId} positions`);
+            this.state.selectedPlayerForSwap = null;
+        }
+
+        this.saveState();
+        this.notifyWatchers();
+    }
+
+    /**
+     * Assign card index as player position (click on black card to assign selected player)
+     */
+    assignPlayerPosition(cardIndex: number): void {
+        if (this.state.gamePhase !== 'playerSelection') return;
+        if (this.state.selectedPlayerForSwap === null) return;
+
+        // Find if any player is already at this position
+        const existingPlayer = Object.entries(this.state.playerPositions)
+            .find(([, pos]) => pos === cardIndex);
+
+        if (existingPlayer) {
+            // Swap with existing player
+            const existingPlayerId = parseInt(existingPlayer[0]);
+            const selectedPos = this.state.playerPositions[this.state.selectedPlayerForSwap];
+
+            this.state.playerPositions[existingPlayerId] = selectedPos;
+            this.state.playerPositions[this.state.selectedPlayerForSwap] = cardIndex;
+        } else {
+            // Just move to this position
+            this.state.playerPositions[this.state.selectedPlayerForSwap] = cardIndex;
+        }
+
+        streamDeck.logger.info(`Assigned player ${this.state.selectedPlayerForSwap} to position ${cardIndex}`);
+        this.state.selectedPlayerForSwap = null;
+
+        this.saveState();
+        this.notifyWatchers();
+    }
+
+    /**
+     * Start countdown phase
+     */
+    startCountdown(): void {
+        if (this.state.gamePhase !== 'playerSelection') return;
+
+        this.state.gamePhase = 'countdown';
+        this.state.selectionTimer = Date.now(); // Reuse for countdown
+
+        streamDeck.logger.info('Starting pre-game countdown');
+
+        // Auto-transition to live after countdown
+        setTimeout(() => {
+            if (this.state.gamePhase === 'countdown') {
+                this.state.gamePhase = 'live';
+                this.state.selectionTimer = null;
+                this.saveState();
+                this.notifyWatchers();
+                streamDeck.logger.info('Game is now live!');
+            }
+        }, this.state.timerSettings.countdownDuration * 1000);
+
+        this.saveState();
+        this.notifyWatchers();
+    }
+
+    /**
+     * Get countdown remaining time
+     */
+    getCountdownRemaining(): number {
+        if (this.state.gamePhase !== 'countdown' || !this.state.selectionTimer) return 0;
+
+        const elapsed = (Date.now() - this.state.selectionTimer) / 1000;
+        const remaining = this.state.timerSettings.countdownDuration - elapsed;
+        return Math.max(0, remaining);
+    }
+
+    /**
+     * Handle buzz-in attempt (press)
      */
     buzzIn(playerId: number): boolean {
         if (this.state.gamePhase !== 'live') {
@@ -213,9 +435,10 @@ export class GameStateManager {
             return false;
         }
 
-        this.state.gamePhase = 'buzzed';
+        this.state.gamePhase = 'buzzHeld';
         this.state.buzzedInPlayer = playerId;
-        streamDeck.logger.info(`Player ${playerId} buzzed in`);
+        this.state.buzzPressTime = Date.now();
+        streamDeck.logger.info(`Player ${playerId} pressed buzzer`);
 
         this.saveState();
         this.notifyWatchers();
@@ -223,13 +446,55 @@ export class GameStateManager {
     }
 
     /**
+     * Check if buzz hold has timed out
+     */
+    isBuzzHoldTimedOut(): boolean {
+        if (!this.state.buzzPressTime) return false;
+
+        const elapsed = (Date.now() - this.state.buzzPressTime) / 1000;
+        return elapsed > this.state.timerSettings.buzzHoldTimeout;
+    }
+
+    /**
+     * Handle buzz hold timeout
+     */
+    handleBuzzHoldTimeout(): void {
+        if (this.state.gamePhase !== 'buzzHeld') return;
+
+        streamDeck.logger.info(`Player ${this.state.buzzedInPlayer} failed to release buzzer in time`);
+
+        const player = this.state.players.find(p => p.id === this.state.buzzedInPlayer);
+        if (player) {
+            player.unsuccessfulSets++;
+        }
+
+        // Return to live
+        this.state.gamePhase = 'live';
+        this.state.buzzedInPlayer = null;
+        this.state.buzzPressTime = null;
+
+        this.saveState();
+        this.notifyWatchers();
+    }
+
+    /**
      * Start selection timer (called when buzzer is released)
      */
     startSelectionTimer(): void {
-        if (this.state.gamePhase === 'buzzed') {
-            this.state.gamePhase = 'selecting';
-            this.state.selectionTimer = Date.now();
-            streamDeck.logger.info('Selection timer started');
+        if (this.state.gamePhase === 'buzzHeld') {
+            this.state.gamePhase = 'buzzed';
+            this.state.buzzPressTime = null;
+
+            // Short delay to show buzz winner, then start selecting
+            setTimeout(() => {
+                if (this.state.gamePhase === 'buzzed') {
+                    this.state.gamePhase = 'selecting';
+                    this.state.selectionTimer = Date.now();
+                    streamDeck.logger.info('Selection timer started');
+                    this.saveState();
+                    this.notifyWatchers();
+                }
+            }, 1000); // 1 second to show buzz winner
 
             this.saveState();
             this.notifyWatchers();
@@ -243,7 +508,62 @@ export class GameStateManager {
         if (this.state.selectionTimer === null) return false;
 
         const elapsed = (Date.now() - this.state.selectionTimer) / 1000;
-        return elapsed > this.state.selectionTimeoutSeconds;
+        return elapsed > this.state.timerSettings.selectionTimeout;
+    }
+
+    /**
+     * Get selection time remaining
+     */
+    getSelectionTimeRemaining(): number {
+        if (!this.state.selectionTimer) return 0;
+
+        const elapsed = (Date.now() - this.state.selectionTimer) / 1000;
+        const remaining = this.state.timerSettings.selectionTimeout - elapsed;
+        return Math.max(0, remaining);
+    }
+
+    /**
+     * Get buzz hold time remaining
+     */
+    getBuzzHoldTimeRemaining(): number {
+        if (!this.state.buzzPressTime) return 0;
+
+        const elapsed = (Date.now() - this.state.buzzPressTime) / 1000;
+        const remaining = this.state.timerSettings.buzzHoldTimeout - elapsed;
+        return Math.max(0, remaining);
+    }
+
+    /**
+     * Update timer settings
+     */
+    updateTimerSettings(settings: Partial<TimerSettings>): void {
+        this.state.timerSettings = { ...this.state.timerSettings, ...settings };
+        streamDeck.logger.info(`Timer settings updated: ${JSON.stringify(this.state.timerSettings)}`);
+        this.saveState();
+        this.notifyWatchers();
+    }
+
+    /**
+     * Get player position by ID
+     */
+    getPlayerPosition(playerId: number): number | undefined {
+        return this.state.playerPositions[playerId];
+    }
+
+    /**
+     * Check if card index is a player position
+     */
+    isPlayerPosition(cardIndex: number): boolean {
+        return Object.values(this.state.playerPositions).includes(cardIndex);
+    }
+
+    /**
+     * Get player ID at card index
+     */
+    getPlayerAtPosition(cardIndex: number): number | null {
+        const entry = Object.entries(this.state.playerPositions)
+            .find(([, pos]) => pos === cardIndex);
+        return entry ? parseInt(entry[0]) : null;
     }
 
     /**

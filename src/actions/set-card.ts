@@ -1,6 +1,7 @@
 /**
  * Set Card Action
  * Main action for displaying and interacting with Set cards
+ * Features auto-configuration and enhanced setup flow
  */
 
 import streamDeck, {
@@ -17,12 +18,11 @@ import streamDeck, {
 
 import { GameStateManager, GameState } from "../game-state-manager";
 import { CardRenderer } from "../card-renderer";
+import { SplashRenderer } from "../splash-renderer";
 import { ThemeSystem } from "../theme-system";
 
 type SetCardSettings = {
-    cardIndex?: number; // Which of the 12 cards this displays (0-11)
-    isBuzzer?: boolean; // Is this a buzzer button?
-    playerId?: number; // If buzzer, which player? (1-4)
+    // Settings are minimal - auto-configured by game manager
 };
 
 @action({ UUID: "com.jw.set-matching-game-solo--multiplayer.card" })
@@ -36,34 +36,22 @@ export class SetCardAction extends SingletonAction<SetCardSettings> {
      * Handle button/dial appearing
      */
     override async onWillAppear(ev: WillAppearEvent<SetCardSettings>): Promise<void> {
-        const { action, payload } = ev;
+        const { action } = ev;
         streamDeck.logger.info(`Card action appeared: ${action.id}`);
 
-        const settings = payload.settings;
-
-        // Set default settings if not present
-        settings.cardIndex ??= 0;
-        settings.isBuzzer ??= false;
-
-        await action.setSettings(settings);
-
-        // Register this card with game manager
-        if (!settings.isBuzzer) {
-            this.gameManager.registerCard(action.id, settings.cardIndex);
-        } else if (settings.playerId) {
-            this.gameManager.registerBuzzer(action.id, settings.playerId);
-        }
+        // Register this instance with game manager (auto-assigns card index)
+        this.gameManager.registerInstance(action.id);
 
         // Watch for game state changes
         const unwatch = this.gameManager.watch((state) => {
-            this.updateDisplay(action.id, settings, state);
+            this.updateDisplay(action.id, state);
         });
         this.unwatchFunctions.set(action.id, unwatch);
 
         // Initial render
-        this.updateDisplay(action.id, settings, this.gameManager.getState());
+        this.updateDisplay(action.id, this.gameManager.getState());
 
-        // Start periodic timer check (for selection timeout)
+        // Start periodic timer check
         this.startTimerCheck(action.id);
     }
 
@@ -73,6 +61,9 @@ export class SetCardAction extends SingletonAction<SetCardSettings> {
     override async onWillDisappear(ev: WillDisappearEvent<SetCardSettings>): Promise<void> {
         const { action } = ev;
         streamDeck.logger.info(`Card action disappeared: ${action.id}`);
+
+        // Unregister this instance
+        this.gameManager.unregisterInstance(action.id);
 
         // Clean up watcher
         const unwatch = this.unwatchFunctions.get(action.id);
@@ -93,100 +84,131 @@ export class SetCardAction extends SingletonAction<SetCardSettings> {
     }
 
     /**
-     * Handle settings change
+     * Handle settings change (no-op since auto-configured)
      */
     override async onDidReceiveSettings(ev: DidReceiveSettingsEvent<SetCardSettings>): Promise<void> {
-        const { action, payload } = ev;
-        const settings = payload.settings;
-        streamDeck.logger.info(`Settings changed for ${action.id}: ${JSON.stringify(settings)}`);
-
-        // Re-register with game manager
-        if (!settings.isBuzzer) {
-            this.gameManager.registerCard(action.id, settings.cardIndex ?? 0);
-        } else if (settings.playerId) {
-            this.gameManager.registerBuzzer(action.id, settings.playerId);
-        }
-
-        // Update display
-        this.updateDisplay(action.id, settings, this.gameManager.getState());
+        // Settings are auto-managed, just refresh display
+        this.updateDisplay(ev.action.id, this.gameManager.getState());
     }
 
     /**
      * Handle key/dial press down
      */
     override async onKeyDown(ev: KeyDownEvent<SetCardSettings>): Promise<void> {
-        const settings = ev.payload.settings;
-        await this.handlePress(ev.action.id, settings, true);
+        await this.handlePress(ev.action.id);
     }
 
     override async onDialDown(ev: DialDownEvent<SetCardSettings>): Promise<void> {
-        const settings = ev.payload.settings;
-        await this.handlePress(ev.action.id, settings, false);
+        await this.handlePress(ev.action.id);
     }
 
     /**
      * Handle key/dial press up (release)
      */
     override async onKeyUp(ev: KeyUpEvent<SetCardSettings>): Promise<void> {
-        const settings = ev.payload.settings;
-        await this.handleRelease(ev.action.id, settings);
+        await this.handleRelease(ev.action.id);
     }
 
     override async onDialUp(ev: DialUpEvent<SetCardSettings>): Promise<void> {
-        const settings = ev.payload.settings;
-        await this.handleRelease(ev.action.id, settings);
+        await this.handleRelease(ev.action.id);
     }
 
     /**
-     * Handle button press
+     * Handle button press (context-sensitive based on game phase)
      */
-    private async handlePress(actionId: string, settings: SetCardSettings, isButton: boolean): Promise<void> {
+    private async handlePress(actionId: string): Promise<void> {
         this.buttonStates.set(actionId, true);
         const state = this.gameManager.getState();
+        const cardIndex = this.gameManager.getCardIndexForContext(actionId);
 
-        if (settings.isBuzzer && settings.playerId) {
-            // This is a buzzer button
-            if (state.gamePhase === 'live') {
-                const success = this.gameManager.buzzIn(settings.playerId);
-                if (success) {
-                    streamDeck.logger.info(`Player ${settings.playerId} buzzed in successfully`);
+        switch (state.gamePhase) {
+            case 'setup':
+                // No interaction in setup
+                break;
+
+            case 'playerSelection':
+                // Check if this is a player position
+                const playerId = this.gameManager.getPlayerAtPosition(cardIndex);
+
+                if (playerId !== null) {
+                    // Clicked a player button - select for swap
+                    this.gameManager.selectPlayerForSwap(playerId);
+                } else if (cardIndex === 5 || cardIndex === 6) {
+                    // Center buttons - start game
+                    this.gameManager.startCountdown();
+                } else {
+                    // Clicked a black card - assign selected player here
+                    this.gameManager.assignPlayerPosition(cardIndex);
                 }
-            } else if (state.gamePhase === 'selecting' && state.buzzedInPlayer === settings.playerId) {
-                // Player pressed their buzzer again during selection - treat as card selection
-                this.gameManager.selectCard(settings.cardIndex ?? 0);
-            }
-        } else {
-            // This is a card button
-            if (state.gamePhase === 'selecting') {
-                this.gameManager.selectCard(settings.cardIndex ?? 0);
-            }
+                break;
+
+            case 'countdown':
+                // No interaction during countdown
+                break;
+
+            case 'live':
+                // Buzz in!
+                const playerAtPos = this.gameManager.getPlayerAtPosition(cardIndex);
+                if (playerAtPos !== null) {
+                    this.gameManager.buzzIn(playerAtPos);
+                }
+                break;
+
+            case 'buzzHeld':
+                // Already buzzed, no action
+                break;
+
+            case 'buzzed':
+                // Waiting for selection phase, no action
+                break;
+
+            case 'selecting':
+                // Select this card for the set
+                if (!this.gameManager.isPlayerPosition(cardIndex)) {
+                    this.gameManager.selectCard(cardIndex);
+                }
+                break;
+
+            case 'validating':
+            case 'cooldown':
+                // No interaction during validation/cooldown
+                break;
         }
     }
 
     /**
      * Handle button release
      */
-    private async handleRelease(actionId: string, settings: SetCardSettings): Promise<void> {
+    private async handleRelease(actionId: string): Promise<void> {
         const wasPressed = this.buttonStates.get(actionId);
         this.buttonStates.set(actionId, false);
 
         const state = this.gameManager.getState();
+        const cardIndex = this.gameManager.getCardIndexForContext(actionId);
 
-        // If this was a buzzer that just got released during "buzzed" phase, start timer
-        if (settings.isBuzzer && settings.playerId && wasPressed) {
-            if (state.gamePhase === 'buzzed' && state.buzzedInPlayer === settings.playerId) {
+        // If this is a player position and buzzer was held, release it
+        if (state.gamePhase === 'buzzHeld' && wasPressed) {
+            const playerId = this.gameManager.getPlayerAtPosition(cardIndex);
+            if (playerId === state.buzzedInPlayer) {
                 this.gameManager.startSelectionTimer();
-                streamDeck.logger.info(`Selection timer started for player ${settings.playerId}`);
             }
         }
     }
 
     /**
-     * Start periodic timer check for selection timeout
+     * Start periodic timer check
      */
     private startTimerCheck(actionId: string): void {
         const timer = setInterval(() => {
             const state = this.gameManager.getState();
+
+            // Check buzz hold timeout
+            if (state.gamePhase === 'buzzHeld' && this.gameManager.isBuzzHoldTimedOut()) {
+                streamDeck.logger.info('Buzz hold timed out');
+                this.gameManager.handleBuzzHoldTimeout();
+            }
+
+            // Check selection timeout
             if (state.gamePhase === 'selecting' && this.gameManager.isSelectionTimedOut()) {
                 streamDeck.logger.info('Selection timed out');
                 this.gameManager.handleTimeout();
@@ -197,52 +219,133 @@ export class SetCardAction extends SingletonAction<SetCardSettings> {
     }
 
     /**
-     * Update the display for this action
+     * Update the display for this action (phase-aware rendering)
      */
-    private async updateDisplay(actionId: string, settings: SetCardSettings, state: GameState): Promise<void> {
+    private async updateDisplay(actionId: string, state: GameState): Promise<void> {
         const action = streamDeck.actions.getActionById(actionId);
         if (!action) return;
 
-        // Assume button by default (most common), can be refined later
-        const isButton = true;
+        const isButton = true; // Assume button (most common)
+        const cardIndex = this.gameManager.getCardIndexForContext(actionId);
+        let imageData: string;
+
+        switch (state.gamePhase) {
+            case 'setup':
+                // Show "X out of 12" splash
+                imageData = SplashRenderer.renderSetupSplash(
+                    isButton,
+                    this.gameManager.getInstanceCount()
+                );
+                break;
+
+            case 'playerSelection':
+                // Show player buttons, black cards, or start button
+                const playerId = this.gameManager.getPlayerAtPosition(cardIndex);
+
+                if (playerId !== null) {
+                    // This is a player position - show colored player button
+                    const player = this.gameManager.getPlayer(playerId);
+                    if (player) {
+                        const isSelected = state.selectedPlayerForSwap === playerId;
+                        imageData = SplashRenderer.renderPlayerButton(isButton, player, isSelected);
+                    } else {
+                        imageData = SplashRenderer.renderBlackCard(isButton);
+                    }
+                } else if (cardIndex === 5 || cardIndex === 6) {
+                    // Center position - start button
+                    imageData = SplashRenderer.renderStartButton(isButton);
+                } else {
+                    // Regular position - black card
+                    imageData = SplashRenderer.renderBlackCard(isButton);
+                }
+                break;
+
+            case 'countdown':
+                // Show countdown with rules
+                const timeRemaining = this.gameManager.getCountdownRemaining();
+                imageData = SplashRenderer.renderCountdown(isButton, timeRemaining, cardIndex);
+                break;
+
+            case 'buzzHeld':
+                // Show black-out on non-player positions, buzz winner on player positions
+                if (this.gameManager.isPlayerPosition(cardIndex)) {
+                    const buzzerPlayerId = this.gameManager.getPlayerAtPosition(cardIndex);
+                    if (buzzerPlayerId !== null && buzzerPlayerId === state.buzzedInPlayer) {
+                        // Show buzz winner with hold timer
+                        const player = this.gameManager.getPlayer(buzzerPlayerId);
+                        if (player) {
+                            const holdTime = this.gameManager.getBuzzHoldTimeRemaining();
+                            imageData = SplashRenderer.renderBuzzWinner(isButton, player, holdTime);
+                        } else {
+                            imageData = SplashRenderer.renderBlackOut(isButton);
+                        }
+                    } else {
+                        imageData = SplashRenderer.renderBlackOut(isButton);
+                    }
+                } else {
+                    imageData = SplashRenderer.renderBlackOut(isButton);
+                }
+                break;
+
+            case 'buzzed':
+                // Show buzz winner briefly
+                const buzzerPlayer = this.gameManager.getPlayer(state.buzzedInPlayer!);
+                if (buzzerPlayer) {
+                    imageData = SplashRenderer.renderBuzzWinner(isButton, buzzerPlayer);
+                } else {
+                    imageData = SplashRenderer.renderBlackOut(isButton);
+                }
+                break;
+
+            case 'live':
+            case 'selecting':
+            case 'validating':
+            case 'cooldown':
+                // Show game cards
+                imageData = await this.renderGameCard(isButton, cardIndex, state);
+                break;
+
+            default:
+                imageData = SplashRenderer.renderBlackCard(isButton);
+        }
+
+        await action.setImage(imageData);
+    }
+
+    /**
+     * Render normal game card
+     */
+    private async renderGameCard(isButton: boolean, cardIndex: number, state: GameState): Promise<string> {
         const theme = ThemeSystem.getTheme(state.themeId);
 
-        // Determine if this button should show score corners
+        // Check if this is a player position for score display
         let showScoreCorners = false;
         let successfulSets = 0;
         let unsuccessfulSets = 0;
         let playerColor: string | undefined;
 
-        if (settings.isBuzzer && settings.playerId) {
-            const player = this.gameManager.getPlayer(settings.playerId);
+        const playerId = this.gameManager.getPlayerAtPosition(cardIndex);
+        if (playerId !== null) {
+            const player = this.gameManager.getPlayer(playerId);
             if (player) {
                 showScoreCorners = true;
                 successfulSets = player.successfulSets;
                 unsuccessfulSets = player.unsuccessfulSets;
                 playerColor = player.color;
             }
-        } else if (state.playerCount === 1 && ((settings.cardIndex ?? 0) === 0 || (settings.cardIndex ?? 0) === 1)) {
-            // Solo mode: show score on first two cards
-            const player = state.players[0];
-            showScoreCorners = true;
-            successfulSets = player.successfulSets;
-            unsuccessfulSets = player.unsuccessfulSets;
         }
 
         // Get the card to display
-        const card = this.gameManager.getCard(settings.cardIndex ?? 0);
+        const card = this.gameManager.getCard(cardIndex);
         if (!card) {
-            // No card available
-            const imageData = CardRenderer.renderPlaceholder(isButton, 'No Card');
-            await action.setImage(imageData);
-            return;
+            return CardRenderer.renderPlaceholder(isButton, 'No Card');
         }
 
         // Check if this card is selected
-        const isSelected = this.gameManager.isCardSelected(settings.cardIndex ?? 0);
+        const isSelected = this.gameManager.isCardSelected(cardIndex);
 
         // Render the card
-        const imageData = CardRenderer.renderCard(card, theme, {
+        return CardRenderer.renderCard(card, theme, {
             isButton,
             isSelected,
             showScoreCorners,
@@ -251,7 +354,5 @@ export class SetCardAction extends SingletonAction<SetCardSettings> {
             gamePhase: state.gamePhase,
             playerColor
         });
-
-        await action.setImage(imageData);
     }
 }

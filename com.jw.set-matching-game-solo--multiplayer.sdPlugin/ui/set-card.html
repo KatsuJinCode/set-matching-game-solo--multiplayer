@@ -58,52 +58,45 @@
 </head>
 <body>
     <div class="section">
-        <div class="section-title">Card Configuration</div>
-
-        <sdpi-item label="Card Index">
-            <sdpi-select setting="cardIndex" default="0">
-                <option value="0">Card 1</option>
-                <option value="1">Card 2</option>
-                <option value="2">Card 3</option>
-                <option value="3">Card 4</option>
-                <option value="4">Card 5</option>
-                <option value="5">Card 6</option>
-                <option value="6">Card 7</option>
-                <option value="7">Card 8</option>
-                <option value="8">Card 9</option>
-                <option value="9">Card 10</option>
-                <option value="10">Card 11</option>
-                <option value="11">Card 12</option>
-            </sdpi-select>
-        </sdpi-item>
+        <div class="section-title">Auto-Configuration</div>
 
         <div class="info-text">
-            Select which of the 12 cards this button/dial displays. Use card indices 1-12 for a complete game board.
+            <strong>✨ Setup is automatic!</strong><br>
+            Simply drag 12 instances of this action onto your Stream Deck and they'll auto-configure themselves.
+            <br><br>
+            1. Drag out 12 actions → Each shows "X out of 12"<br>
+            2. Once all 12 are placed → Player selection mode starts<br>
+            3. Click colored buttons to swap player positions<br>
+            4. Click center "Start Game" button → Countdown begins<br>
+            5. Game starts automatically!
         </div>
     </div>
 
     <div class="section">
-        <div class="section-title">Buzzer Configuration</div>
+        <div class="section-title">Timer Settings</div>
 
-        <sdpi-item label="Is Buzzer Button">
-            <sdpi-checkbox setting="isBuzzer" default="false"></sdpi-checkbox>
-        </sdpi-item>
-
-        <sdpi-item label="Player ID (if buzzer)">
-            <sdpi-select setting="playerId" default="1">
-                <option value="1">Player 1</option>
-                <option value="2">Player 2</option>
-                <option value="3">Player 3</option>
-                <option value="4">Player 4</option>
-            </sdpi-select>
+        <sdpi-item label="Buzz Hold Timeout (seconds)">
+            <sdpi-range setting="buzzHoldTimeout" min="1" max="10" default="3"></sdpi-range>
         </sdpi-item>
 
         <div class="info-text">
-            Enable "Is Buzzer Button" if this button is a dedicated buzzer for a player. The button will show the player's score and allow them to buzz in during live game.
+            How long a player has to release their buzzer after pressing it.
         </div>
 
-        <div class="warning">
-            <strong>Note:</strong> Any card can also act as a buzzer! You don't need separate buzzer buttons unless you want dedicated score displays.
+        <sdpi-item label="Selection Timeout (seconds)">
+            <sdpi-range setting="selectionTimeout" min="2" max="10" default="4"></sdpi-range>
+        </sdpi-item>
+
+        <div class="info-text">
+            How long a player has to select their 3 cards after releasing the buzzer.
+        </div>
+
+        <sdpi-item label="Countdown Duration (seconds)">
+            <sdpi-range setting="countdownDuration" min="3" max="10" default="5"></sdpi-range>
+        </sdpi-item>
+
+        <div class="info-text">
+            How long the pre-game countdown and rules display lasts.
         </div>
     </div>
 
@@ -111,28 +104,28 @@
         <div class="section-title">How to Play</div>
 
         <div class="info-text">
-            <strong>Setup:</strong><br>
-            1. Place 12 card buttons/dials on your Stream Deck (indices 1-12)<br>
-            2. For multiplayer, designate buzzer buttons for each player<br>
-            3. Cards will automatically display from a shuffled deck<br>
+            <strong>Setup Phase:</strong><br>
+            • Drag 12 instances → Auto-configures card positions<br>
+            • Player selection → Click colored buttons to choose positions<br>
+            • Default positions: Corners (0, 3, 8, 11) for 4 players<br>
+            • Click center "Start Game" → Countdown begins<br>
             <br>
-            <strong>Solo Mode (1 player):</strong><br>
-            • Cards 1 & 2 show your score in top corners<br>
-            • Click any 3 cards to form a Set<br>
-            • Valid sets increment ✓, invalid sets increment ✗<br>
-            <br>
-            <strong>Multiplayer Mode (2-4 players):</strong><br>
-            • Green border indicates game is live<br>
-            • Press buzzer to lock others out<br>
-            • Release buzzer to start 4-second timer<br>
-            • Select 3 cards before timer expires<br>
-            • Valid sets replace cards and add to score<br>
-            • Invalid/timeout increments ✗<br>
+            <strong>Gameplay:</strong><br>
+            • Green border = game is live, buzz in allowed<br>
+            • Press and HOLD your player button to buzz in<br>
+            • Screen blacks out, only your color shows<br>
+            • Release within {buzzHoldTimeout}s or lose turn<br>
+            • After release: 1s to show winner<br>
+            • Then {selectionTimeout}s to select 3 cards<br>
+            • Valid set ✓ adds point, invalid/timeout ✗ adds miss<br>
+            • 1s cooldown animation, then back to live<br>
             <br>
             <strong>Valid Set Rules:</strong><br>
-            Each property (shape, color, count, fill) must be either:<br>
-            • All the SAME across 3 cards, OR<br>
-            • All DIFFERENT across 3 cards
+            Each property must be all SAME or all DIFFERENT:<br>
+            • Shape: Diamond, Oval, Squiggle<br>
+            • Color: Red, Green, Purple<br>
+            • Count: 1, 2, 3<br>
+            • Fill: Solid, Striped, Empty
         </div>
     </div>
 
@@ -150,6 +143,33 @@
             .catch(() => {
                 // Ignore errors, keep default version
             });
+
+        // Listen for timer settings changes and send to plugin
+        window.addEventListener('message', (event) => {
+            if (event.data.event === 'didReceiveSettings') {
+                const settings = event.data.payload.settings;
+
+                // Check if timer settings changed
+                if (settings.buzzHoldTimeout !== undefined ||
+                    settings.selectionTimeout !== undefined ||
+                    settings.countdownDuration !== undefined) {
+
+                    // Send to plugin to update game state
+                    if (websocket && websocket.readyState === WebSocket.OPEN) {
+                        websocket.send(JSON.stringify({
+                            event: 'sendToPlugin',
+                            context: context,
+                            payload: {
+                                action: 'updateTimers',
+                                buzzHoldTimeout: settings.buzzHoldTimeout,
+                                selectionTimeout: settings.selectionTimeout,
+                                countdownDuration: settings.countdownDuration
+                            }
+                        }));
+                    }
+                }
+            }
+        });
     </script>
 </body>
 </html>
