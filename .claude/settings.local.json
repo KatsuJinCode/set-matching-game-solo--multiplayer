@@ -5,7 +5,15 @@
       "Bash(Select-Object Name, Mode, Length, LastWriteTime)",
       "Bash(git init:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(gh repo create:*)",
+      "Bash(winget install:*)",
+      "Bash(gh auth:*)",
+      "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" auth status)",
+      "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" auth login)",
+      "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" repo create set-matching-game-solo--multiplayer --public --source=. --description=\"A Stream Deck plugin that brings the classic Set card game to your Stream Deck. Features solo and offline multiplayer modes (up to 4 players) with support for both buttons and dials. Race to find matching sets of symbols!\" --push)",
+      "Bash(npm run build:*)",
+      "Bash(npm install:*)"
     ],
     "deny": [],
     "ask": []
